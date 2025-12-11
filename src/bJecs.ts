@@ -48,6 +48,20 @@ export interface Query<T extends unknown[]> {
     filter(fn: (entry: [EntityId, ...T]) => boolean): Array<[EntityId, ...T]>;
 }
 
+export interface Group {
+    readonly id: number;
+    addEntity(entity: EntityId): void;
+    removeEntity(entity: EntityId): void;
+    hasEntity(entity: EntityId): boolean;
+    getEntities(): EntityId[];
+    set<T>(component: Id<T>, value: T): void;
+    get<T>(component: Id<T>): T | undefined;
+    has(component: Id): boolean;
+    remove(component: Id): boolean;
+    onEntityAdded: Event<[EntityId]>;
+    onEntityRemoved: Event<[EntityId]>;
+}
+
 export interface World {
     spawn(): EntityId;
     despawn(entity: EntityId): boolean;
@@ -60,6 +74,11 @@ export interface World {
 
     query<T extends unknown[]>(...components: { [K in keyof T]: Id<T[K]> }): Query<T>;
 
+    createGroup(): Group;
+    removeGroup(group: Group): void;
+    getGroupsForEntity(entity: EntityId): Group[];
+    getGroupsWithComponent(component: Id): Group[];
+
     snapshot(components?: Id[]): Snapshot;
     revert(snapshot: Snapshot): void;
 
@@ -68,6 +87,8 @@ export interface World {
     onEntityDespawned: Event<[EntityId]>;
     onComponentAdded: Event<[EntityId, Id]>;
     onComponentRemoved: Event<[EntityId, Id]>;
+    onEntityAddedToGroup: Event<[EntityId, Group]>;
+    onEntityRemovedFromGroup: Event<[EntityId, Group]>;
 }
 
 // ==============================================
@@ -90,15 +111,71 @@ export function component<T = void>(name: string): Id<T> {
 // World Implementation
 // ==============================================
 
+class GroupImpl implements Group {
+    private static nextId = 1;
+    public readonly id: number;
+    private entities = new Set<EntityId>();
+    private components = new Map<Id, unknown>();
+    
+    public onEntityAdded = new Event<[EntityId]>();
+    public onEntityRemoved = new Event<[EntityId]>();
+
+    constructor() {
+        this.id = GroupImpl.nextId++;
+    }
+
+    addEntity(entity: EntityId): void {
+        if (!this.entities.has(entity)) {
+            this.entities.add(entity);
+            this.onEntityAdded.fire(entity);
+        }
+    }
+
+    removeEntity(entity: EntityId): void {
+        if (this.entities.delete(entity)) {
+            this.onEntityRemoved.fire(entity);
+        }
+    }
+
+    hasEntity(entity: EntityId): boolean {
+        return this.entities.has(entity);
+    }
+
+    getEntities(): EntityId[] {
+        return [...this.entities];
+    }
+
+    set<T>(component: Id<T>, value: T): void {
+        this.components.set(component, value);
+    }
+
+    get<T>(component: Id<T>): T | undefined {
+        return this.components.get(component) as T | undefined;
+    }
+
+    has(component: Id): boolean {
+        return this.components.has(component);
+    }
+
+    remove(component: Id): boolean {
+        return this.components.delete(component);
+    }
+}
+
 class WorldImpl implements World {
     private nextEntityId = 1;
     private entities = new Set<EntityId>();
     private components = new Map<EntityId, Map<Id, unknown>>();
+    private groups = new Set<GroupImpl>();
+    private entityToGroups = new Map<EntityId, Set<GroupImpl>>();
+    private componentToGroups = new Map<Id, Set<GroupImpl>>();
 
     public onEntitySpawned = new Event<[EntityId]>();
     public onEntityDespawned = new Event<[EntityId]>();
     public onComponentAdded = new Event<[EntityId, Id]>();
     public onComponentRemoved = new Event<[EntityId, Id]>();
+    public onEntityAddedToGroup = new Event<[EntityId, Group]>();
+    public onEntityRemovedFromGroup = new Event<[EntityId, Group]>();
 
     spawn(): EntityId {
         const entity = this.nextEntityId++ as EntityId;
@@ -110,6 +187,17 @@ class WorldImpl implements World {
 
     despawn(entity: EntityId): boolean {
         if (!this.valid(entity)) return false;
+        
+        // remove from groups
+        const groups = this.entityToGroups.get(entity);
+        if (groups) {
+            for (const group of groups) {
+                group.removeEntity(entity);
+                this.onEntityRemovedFromGroup.fire(entity, group);
+            }
+            this.entityToGroups.delete(entity);
+        }
+        
         const comps = this.components.get(entity)!;
         for (const [comp] of comps) {
             this.onComponentRemoved.fire(entity, comp);
@@ -134,19 +222,55 @@ class WorldImpl implements World {
 
     get<T>(entity: EntityId, component: Id<T>): T | undefined {
         if (!this.valid(entity)) return undefined;
-        return this.components.get(entity)?.get(component) as T | undefined;
+        
+        const entityComps = this.components.get(entity);
+        if (entityComps?.has(component)) {
+            return entityComps.get(component) as T;
+        }
+        
+        const groups = this.entityToGroups.get(entity);
+        if (groups) {
+            for (const group of groups) {
+                if (group.has(component)) {
+                    return group.get(component);
+                }
+            }
+        }
+        
+        return undefined;
     }
 
     has(entity: EntityId, component: Id): boolean {
         if (!this.valid(entity)) return false;
-        return this.components.get(entity)?.has(component) ?? false;
+        
+        // Check entity's own components
+        const entityComps = this.components.get(entity);
+        if (entityComps?.has(component)) {
+            return true;
+        }
+        
+        // Check groups the entity belongs to
+        const groups = this.entityToGroups.get(entity);
+        if (groups) {
+            for (const group of groups) {
+                if (group.has(component)) {
+                    return true;
+                }
+            }
+        }
+        
+        return false;
     }
 
     remove(entity: EntityId, component: Id): boolean {
         if (!this.valid(entity)) return false;
+        
+        // Only remove from entity, not from groups
         const comps = this.components.get(entity)!;
         const had = comps.delete(component);
-        if (had) this.onComponentRemoved.fire(entity, component);
+        if (had) {
+            this.onComponentRemoved.fire(entity, component);
+        }
         return had;
     }
 
@@ -236,6 +360,57 @@ class WorldImpl implements World {
             entityStates,
             components: components ? [...components] : undefined
         };
+    }
+
+    createGroup(): Group {
+        const group = new GroupImpl();
+        this.groups.add(group);
+        
+        // event forwarding
+        group.onEntityAdded.connect((entity) => {
+            if (!this.entityToGroups.has(entity)) {
+                this.entityToGroups.set(entity, new Set());
+            }
+            this.entityToGroups.get(entity)?.add(group);
+            this.onEntityAddedToGroup.fire(entity, group);
+        });
+        
+        group.onEntityRemoved.connect((entity) => {
+            this.entityToGroups.get(entity)?.delete(group);
+            if (this.entityToGroups.get(entity)?.size() === 0) {
+                this.entityToGroups.delete(entity);
+            }
+            this.onEntityRemovedFromGroup.fire(entity, group);
+        });
+        
+        return group;
+    }
+    
+    removeGroup(group: Group): void {
+        if (!(group instanceof GroupImpl) || !this.groups.has(group)) return;
+        
+        // remove all entities from the group b4 removing itself
+        // will not remove entities from the world tho, ig i should create a method for that
+        for (const entity of group.getEntities()) {
+            group.removeEntity(entity);
+        }
+        
+        this.groups.delete(group);
+    }
+    
+    getGroupsForEntity(entity: EntityId): Group[] {
+        const groups = this.entityToGroups.get(entity);
+        return groups ? [...groups] : [];
+    }
+    
+    getGroupsWithComponent(component: Id): Group[] {
+        const result: Group[] = [];
+        for (const group of this.groups) {
+            if (group.has(component)) {
+                result.push(group);
+            }
+        }
+        return result;
     }
 
     revert(snapshot: Snapshot): void {
