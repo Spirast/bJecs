@@ -17,6 +17,7 @@ export interface Snapshot {
     id: number;
     timestamp: number;
     entityStates: Map<EntityId, Map<Id, unknown>>;
+    components?: Id[]; // Optional array of component IDs that were snapshotted
 }
 
 export type EntityId = number & { readonly __brand: unique symbol };
@@ -59,7 +60,7 @@ export interface World {
 
     query<T extends unknown[]>(...components: { [K in keyof T]: Id<T[K]> }): Query<T>;
 
-    snapshot(): Snapshot;
+    snapshot(components?: Id[]): Snapshot;
     revert(snapshot: Snapshot): void;
 
     // SPIRASTS CUSTOM EVENTS
@@ -205,37 +206,74 @@ class WorldImpl implements World {
         return query;
     }
 
-    snapshot(): Snapshot {
+    snapshot(components?: Id[]): Snapshot {
         const entityStates = new Map<EntityId, Map<Id, unknown>>();
+
         for (const entity of this.entities) {
             const comps = this.components.get(entity)!;
             const cloned = new Map<Id, unknown>();
-            for (const [id, val] of comps) cloned.set(id, deepClone(val));
-            entityStates.set(entity, cloned);
+
+            if (components && components.size() > 0) {
+                for (const id of components) {
+                    if (comps.has(id)) {
+                        cloned.set(id, deepClone(comps.get(id)));
+                    }
+                }
+                if (cloned.size() > 0) {
+                    entityStates.set(entity, cloned);
+                }
+            } else {
+                for (const [id, val] of comps) {
+                    cloned.set(id, deepClone(val));
+                }
+                entityStates.set(entity, cloned);
+            }
         }
-        return { id: generateId(), timestamp: os.clock(), entityStates };
+
+        return {
+            id: generateId(),
+            timestamp: os.clock(),
+            entityStates,
+            components: components ? [...components] : undefined
+        };
     }
 
     revert(snapshot: Snapshot): void {
-        for (const entity of [...this.entities]) {
-            if (!snapshot.entityStates.has(entity)) this.despawn(entity);
-        }
-        for (const [entity, comps] of snapshot.entityStates) {
-            if (!this.entities.has(entity)) {
-                this.entities.add(entity);
-                this.components.set(entity, new Map());
-                this.onEntitySpawned.fire(entity);
+        const isPartial = snapshot.components && snapshot.components.size() > 0;
+
+        if (!isPartial) {
+            for (const entity of [...this.entities]) {
+                if (!snapshot.entityStates.has(entity)) this.despawn(entity);
             }
-            const current = this.components.get(entity)!;
-            for (const [id] of current) {
-                if (!comps.has(id)) {
-                    current.delete(id);
-                    this.onComponentRemoved.fire(entity, id);
+        }
+
+        for (const [entity, snapshotComps] of snapshot.entityStates) {
+            if (!this.entities.has(entity)) {
+                if (snapshotComps.size() > 0) {
+                    this.entities.add(entity);
+                    this.components.set(entity, new Map());
+                    this.onEntitySpawned.fire(entity);
+                } else {
+                    continue;
                 }
             }
-            for (const [id, val] of comps) {
-                current.set(id, deepClone(val));
-                this.onComponentAdded.fire(entity, id);
+
+            const currentComps = this.components.get(entity)!;
+
+            if (!isPartial) {
+                for (const [id] of currentComps) {
+                    if (!snapshotComps.has(id)) {
+                        currentComps.delete(id);
+                        this.onComponentRemoved.fire(entity, id);
+                    }
+                }
+            }
+
+            for (const [id, val] of snapshotComps) {
+                if (!isPartial || !snapshot.components || snapshot.components.includes(id)) {
+                    currentComps.set(id, deepClone(val));
+                    this.onComponentAdded.fire(entity, id);
+                }
             }
         }
     }
@@ -248,12 +286,6 @@ class WorldImpl implements World {
 export function createWorld(): World {
     return new WorldImpl();
 }
-
-// default components
-export const Position = component<{ x: number; y: number; z: number }>("position");
-export const Velocity = component<{ x: number; y: number; z: number }>("velocity");
-export const Health = component<{ current: number; max: number }>("health");
-export const Name = component<string>("name");
 
 // ==============================================
 // Utility Types and Functions
