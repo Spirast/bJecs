@@ -82,6 +82,8 @@ export interface World {
     snapshot(components?: Id[]): Snapshot;
     revert(snapshot: Snapshot): void;
 
+    prefab(components: Array<[Id, any]>): Prefab;
+
     // SPIRASTS CUSTOM EVENTS
     onEntitySpawned: Event<[EntityId]>;
     onEntityDespawned: Event<[EntityId]>;
@@ -89,6 +91,34 @@ export interface World {
     onComponentRemoved: Event<[EntityId, Id]>;
     onEntityAddedToGroup: Event<[EntityId, Group]>;
     onEntityRemovedFromGroup: Event<[EntityId, Group]>;
+}
+
+export class Prefab {
+    private components: Array<[Id, unknown]>;
+    private world: World;
+
+    constructor(world: World, components: Array<[Id, unknown]>) {
+        this.world = world;
+        this.components = components;
+    }
+
+    spawn(overrides: Array<[Id, unknown]> = []): EntityId {
+        const entity = this.world.spawn();
+        
+        for (const [component, value] of this.components) {
+            this.world.set(entity, component, value);
+        }
+        
+        for (const [component, value] of overrides) {
+            this.world.set(entity, component, value);
+        }
+        
+        return entity;
+    }
+
+    extend(components: Array<[Id, unknown]>): Prefab {
+        return new Prefab(this.world, [...this.components, ...components]);
+    }
 }
 
 // ==============================================
@@ -396,6 +426,10 @@ class WorldImpl implements World {
         }
         
         this.groups.delete(group);
+    }
+    
+    prefab(components: Array<[Id, unknown]>): Prefab {
+        return new Prefab(this, components);
     }
     
     getGroupsForEntity(entity: EntityId): Group[] {
