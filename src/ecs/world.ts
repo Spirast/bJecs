@@ -180,12 +180,130 @@ export class WorldImpl implements World {
 	private components = new Map<EntityId, Map<Id, unknown>>();
 	private groups = new Set<GroupImpl>();
 	private entityToGroups = new Map<EntityId, Set<GroupImpl>>();
+	private archetypeToEntities = new Map<string, Set<EntityId>>();
+	private entityToArchetype = new Map<EntityId, string>();
 	public onEntitySpawned = new Event<[EntityId]>();
 	public onEntityDespawned = new Event<[EntityId]>();
 	public onComponentAdded = new Event<[EntityId, Id]>();
 	public onComponentRemoved = new Event<[EntityId, Id]>();
 	public onEntityAddedToGroup = new Event<[EntityId, Group]>();
 	public onEntityRemovedFromGroup = new Event<[EntityId, Group]>();
+
+	/**
+	 * Generates a signature string for an entity's component set
+	 */
+	private generateArchetypeSignature(components: Set<Id>): string {
+		const componentArray: Id[] = [];
+		for (const comp of components) {
+			componentArray.push(comp);
+		}
+		// manual sort
+		const len = componentArray.size();
+		for (let i = 0; i < len - 1; i++) {
+			for (let j = i + 1; j < len; j++) {
+				if (componentArray[i] > componentArray[j]) {
+					const temp = componentArray[i];
+					componentArray[i] = componentArray[j];
+					componentArray[j] = temp;
+				}
+			}
+		}
+		return componentArray.join('|');
+	}
+
+	/**
+	 * Updates an entity's archetype when its components change
+	 */
+	private updateEntityArchetype(entity: EntityId): void {
+		const oldArchetype = this.entityToArchetype.get(entity);
+		const comps = this.components.get(entity);
+		
+		if (!comps || comps.size() === 0) {
+			// Remove from archetype tracking if entity has no components
+			if (oldArchetype) {
+				this.archetypeToEntities.get(oldArchetype)?.delete(entity);
+				if (this.archetypeToEntities.get(oldArchetype)?.size() === 0) {
+					this.archetypeToEntities.delete(oldArchetype);
+				}
+				this.entityToArchetype.delete(entity);
+			}
+			return;
+		}
+
+		const componentKeys: Id[] = [];
+		for (const [key] of comps) {
+			componentKeys.push(key);
+		}
+		const newArchetype = this.generateArchetypeSignature(new Set(componentKeys));
+		
+		if (oldArchetype !== newArchetype) {
+			// Remove from old archetype
+			if (oldArchetype) {
+				this.archetypeToEntities.get(oldArchetype)?.delete(entity);
+				if (this.archetypeToEntities.get(oldArchetype)?.size() === 0) {
+					this.archetypeToEntities.delete(oldArchetype);
+				}
+			}
+			
+			// Add to new archetype
+			if (!this.archetypeToEntities.has(newArchetype)) {
+				this.archetypeToEntities.set(newArchetype, new Set());
+			}
+			this.archetypeToEntities.get(newArchetype)?.add(entity);
+			this.entityToArchetype.set(entity, newArchetype);
+		}
+	}
+
+	/**
+	 * Gets all entities that have all required components and none of the excluded components
+	 * using archetype-based optimization
+	 */
+	private getMatchingEntities(required: Id[], excluded: Id[]): Set<EntityId> {
+		if (required.size() === 0) {
+			// If no required components, filter all entities
+			const result = new Set<EntityId>();
+			for (const entity of this.entities) {
+				const comps = this.components.get(entity);
+				if (!comps) continue;
+				
+				const hasExcluded = excluded.some(comp => comps.has(comp));
+				if (!hasExcluded) {
+					result.add(entity);
+				}
+			}
+			return result;
+		}
+
+		// Find archetypes that contain all required components
+		const matchingArchetypes: string[] = [];
+		
+		for (const archetype of this.archetypeToEntities) {
+			const archetypeComponents = archetype[0].split('|').map((id: string) => tonumber(id) || 0).filter((id: number) => id > 0);
+			
+			// Check if archetype contains all required components
+			const hasAllRequired = required.every(req => archetypeComponents.includes(req));
+			if (!hasAllRequired) continue;
+			
+			// Check if archetype contains any excluded components
+			const hasExcluded = excluded.some(ex => archetypeComponents.includes(ex));
+			if (hasExcluded) continue;
+			
+			matchingArchetypes.push(archetype[0]);
+		}
+
+		// Collect all entities from matching archetypes
+		const result = new Set<EntityId>();
+		for (const archetype of matchingArchetypes) {
+			const entities = this.archetypeToEntities.get(archetype);
+			if (entities) {
+				for (const entity of entities) {
+					result.add(entity);
+				}
+			}
+		}
+
+		return result;
+	}
 
 	/**
 	 * Spawns a new entity in the world.
@@ -262,7 +380,7 @@ export class WorldImpl implements World {
 		const had = comps.has(component);
 		comps.set(component, value);
 
-		// Fire event only if this is a new component
+		this.updateEntityArchetype(entity);
 		if (!had) this.onComponentAdded.fire(entity, component);
 	}
 
@@ -343,6 +461,7 @@ export class WorldImpl implements World {
 
 		const had = comps.delete(component);
 		if (had) {
+			this.updateEntityArchetype(entity);
 			this.onComponentRemoved.fire(entity, component);
 		}
 		return had;
@@ -397,16 +516,13 @@ export class WorldImpl implements World {
 			 * Iterates over all matching entities and calls the callback.
 			 */
 			each(cb: (entity: EntityId, ...components: T) => void): void {
-				for (const entity of world.entities) {
+				const matchingEntities = world.getMatchingEntities(required, excluded);
+				for (const entity of matchingEntities) {
 					const comps = world.components.get(entity);
-					if (!comps) return;
+					if (!comps) continue;
 
-					const hasAll = required.every((c) => comps.has(c));
-					const hasEx = excluded.some((c) => comps.has(c));
-					if (hasAll && !hasEx) {
-						const values = required.map((c) => comps.get(c)) as T;
-						cb(entity, ...values);
-					}
+					const values = required.map((c) => comps.get(c)) as T;
+					cb(entity, ...values);
 				}
 			},
 
