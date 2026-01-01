@@ -4,7 +4,7 @@ A lightweight, high-performance Entity Component System (ECS) library for Roblox
 
 ## Overview
 
-bJecs is a modern ECS implementation designed specifically for Roblox game development using TypeScript. It provides a clean, type-safe API for managing game entities, components, and systems with excellent performance characteristics.
+Virex is a modern ECS implementation designed specifically for Roblox game development using TypeScript. It provides a clean, type-safe API for managing game entities, components, and systems with excellent performance characteristics.
 
 ## Features
 
@@ -19,13 +19,13 @@ bJecs is a modern ECS implementation designed specifically for Roblox game devel
 ## Installation
 
 ```bash
-npm install @rbxts/bjecs
+npm install @rbxts/Virex
 ```
 
 ## Quick Start
 
 ```typescript
-import { createWorld, component } from "@rbxts/bjecs";
+import { createWorld, component } from "@rbxts/Virex";
 
 // Define components
 const Position = component<{ x: number; y: number; z: number }>("Position");
@@ -329,7 +329,7 @@ class Event<T extends unknown[] = []> {
 ### Basic Game Loop
 
 ```typescript
-import { createWorld, component } from "@rbxts/bjecs";
+import { createWorld, component } from "@rbxts/Virex";
 
 const Position = component<{ x: number; y: number; z: number }>("Position");
 const Velocity = component<{ x: number; y: number; z: number }>("Velocity");
